@@ -111,3 +111,71 @@ def list_documents(db: Session = Depends(get_db)):
         }
         for doc in documents
     ]
+@router.post("/{document_id}/process")
+def process_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Parse a PDF: extract text, chunk it, store chunks in DB.
+    Updates document status: pending → processing → ready/failed.
+    """
+    from app.services.storage import download_pdf
+    from app.services.pdf_parser import parse_pdf
+    from app.models import Chunk
+
+    # Find the document
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if document.status == "ready":
+        return {
+            "message": "Document already processed",
+            "document_id": str(document.id),
+            "chunk_count": len(document.chunks),
+        }
+
+    # Mark as processing
+    document.status = "processing"
+    db.commit()
+
+    try:
+        # 1. Download PDF from storage
+        pdf_bytes = download_pdf(document.file_url)
+
+        # 2. Parse and chunk
+        result = parse_pdf(pdf_bytes)
+
+        # 3. Save chunks to DB
+        chunk_objects = [
+            Chunk(
+                document_id=document.id,
+                content=chunk["content"],
+                chunk_index=chunk["chunk_index"],
+                page_number=chunk["page"],
+            )
+            for chunk in result["chunks"]
+        ]
+        db.bulk_save_objects(chunk_objects)
+
+        # 4. Update document
+        document.page_count = result["page_count"]
+        document.status = "ready"
+        db.commit()
+        db.refresh(document)
+
+        return {
+            "message": "Processing complete",
+            "document_id": str(document.id),
+            "page_count": document.page_count,
+            "chunk_count": len(result["chunks"]),
+        }
+
+    except Exception as e:
+        document.status = "failed"
+        db.commit()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Processing failed: {str(e)}",
+        )

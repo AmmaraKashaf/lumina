@@ -55,3 +55,7 @@ def upload_pdf(file_bytes: bytes, original_filename: str, user_id: str) -> dict:
 def delete_pdf(storage_path: str) -> None:
     """Delete a PDF from storage."""
     _supabase_client.storage.from_(BUCKET_NAME).remove([storage_path])
+def download_pdf(storage_path: str) -> bytes:
+    """Download a PDF from Supabase Storage and return its bytes."""
+    response = _supabase_client.storage.from_(BUCKET_NAME).download(storage_path)
+    return response    
