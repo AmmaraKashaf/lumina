@@ -1,13 +1,13 @@
 """
-Document endpoints: upload, list, delete.
+Document endpoints: upload (with auto-processing), list, reprocess.
 """
 
 from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Document, User
-from app.services.storage import upload_pdf
-import uuid
+from app.models import Document, User, Chunk
+from app.services.storage import upload_pdf, download_pdf
+from app.services.pdf_parser import parse_pdf
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -34,7 +34,8 @@ async def upload_document(
 ):
     """
     Upload a PDF document.
-    Validates file type, stores in Supabase Storage, creates DB record.
+    Validates file type, stores in Supabase Storage, creates DB record,
+    then automatically parses and chunks the PDF in the same request.
     """
     # Validate content type
     if file.content_type != "application/pdf":
@@ -47,11 +48,11 @@ async def upload_document(
     file_bytes = await file.read()
 
     # Check file size (50 MB max)
-    max_size = 50 * 1024 * 1024  # 50 MB in bytes
+    max_size = 50 * 1024 * 1024
     if len(file_bytes) > max_size:
         raise HTTPException(
             status_code=400,
-            detail=f"File too large. Max size: 50 MB. Got: {len(file_bytes) / 1024 / 1024:.1f} MB",
+            detail=f"File too large. Max 50 MB. Got: {len(file_bytes) / 1024 / 1024:.1f} MB",
         )
 
     # Get/create test user
@@ -70,23 +71,53 @@ async def upload_document(
             detail=f"Storage upload failed: {str(e)}",
         )
 
-    # Create database record
+    # Create database record (status starts as "processing")
     document = Document(
         user_id=user.id,
         title=file.filename or "Untitled",
         filename=file.filename or "unnamed.pdf",
         file_url=storage_result["path"],
-        status="pending",
+        status="processing",
     )
     db.add(document)
     db.commit()
     db.refresh(document)
+
+    # Auto-process: parse PDF + create chunks
+    chunk_count = 0
+    try:
+        result = parse_pdf(file_bytes)  # reuse bytes already in memory
+
+        chunk_objects = [
+            Chunk(
+                document_id=document.id,
+                content=chunk["content"],
+                chunk_index=chunk["chunk_index"],
+                page_number=chunk["page"],
+            )
+            for chunk in result["chunks"]
+        ]
+        db.bulk_save_objects(chunk_objects)
+
+        document.page_count = result["page_count"]
+        document.status = "ready"
+        db.commit()
+        db.refresh(document)
+
+        chunk_count = len(result["chunks"])
+    except Exception as e:
+        document.status = "failed"
+        db.commit()
+        # Don't fail the upload — file is saved, processing can be retried
+        print(f"⚠️  Processing failed for {document.id}: {e}")
 
     return {
         "id": str(document.id),
         "title": document.title,
         "filename": document.filename,
         "status": document.status,
+        "page_count": document.page_count,
+        "chunk_count": chunk_count,
         "signed_url": storage_result["signed_url"],
     }
 
@@ -107,24 +138,23 @@ def list_documents(db: Session = Depends(get_db)):
             "title": doc.title,
             "filename": doc.filename,
             "status": doc.status,
+            "page_count": doc.page_count,
+            "chunk_count": len(doc.chunks),
             "created_at": doc.created_at.isoformat(),
         }
         for doc in documents
     ]
+
+
 @router.post("/{document_id}/process")
 def process_document(
     document_id: str,
     db: Session = Depends(get_db),
 ):
     """
-    Parse a PDF: extract text, chunk it, store chunks in DB.
-    Updates document status: pending → processing → ready/failed.
+    Manually re-process a PDF (useful for documents that failed or pre-date auto-processing).
+    Parses the PDF, generates chunks, updates status.
     """
-    from app.services.storage import download_pdf
-    from app.services.pdf_parser import parse_pdf
-    from app.models import Chunk
-
-    # Find the document
     document = db.query(Document).filter(Document.id == document_id).first()
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
@@ -136,18 +166,19 @@ def process_document(
             "chunk_count": len(document.chunks),
         }
 
-    # Mark as processing
     document.status = "processing"
     db.commit()
 
     try:
-        # 1. Download PDF from storage
+        # Download bytes from storage
         pdf_bytes = download_pdf(document.file_url)
 
-        # 2. Parse and chunk
+        # Parse and chunk
         result = parse_pdf(pdf_bytes)
 
-        # 3. Save chunks to DB
+        # Delete any old chunks before re-creating (avoids duplicates on retry)
+        db.query(Chunk).filter(Chunk.document_id == document.id).delete()
+
         chunk_objects = [
             Chunk(
                 document_id=document.id,
@@ -159,7 +190,6 @@ def process_document(
         ]
         db.bulk_save_objects(chunk_objects)
 
-        # 4. Update document
         document.page_count = result["page_count"]
         document.status = "ready"
         db.commit()

@@ -7,6 +7,8 @@ interface Document {
   title: string;
   filename: string;
   status: string;
+  page_count?: number;
+  chunk_count?: number;
 }
 
 interface UploadResponse extends Document {
@@ -68,6 +70,19 @@ export default function Home() {
     }
   };
 
+  const reprocessDocument = async (docId: string) => {
+    try {
+      const res = await fetch(
+        `http://localhost:8000/documents/${docId}/process`,
+        { method: "POST" }
+      );
+      if (!res.ok) throw new Error("Reprocess failed");
+      await loadDocuments();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Reprocess failed");
+    }
+  };
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-8">
       <div className="max-w-4xl mx-auto">
@@ -106,7 +121,7 @@ export default function Home() {
             <div className="text-5xl mb-4">{uploading ? "⏳" : "📄"}</div>
             <p className="text-xl font-medium mb-2">
               {uploading
-                ? "Uploading..."
+                ? "Uploading & processing..."
                 : dragActive
                 ? "Drop your PDF here"
                 : "Drag a PDF here or click to browse"}
@@ -149,22 +164,40 @@ export default function Home() {
                     <div className="text-2xl">📄</div>
                     <div>
                       <p className="font-medium">{doc.title}</p>
-                      <p className="text-xs text-slate-400">{doc.filename}</p>
+                      <p className="text-xs text-slate-400">
+                        {doc.filename}
+                        {doc.page_count != null && (
+                          <span className="ml-2">· {doc.page_count} pages</span>
+                        )}
+                        {doc.chunk_count != null && doc.chunk_count > 0 && (
+                          <span className="ml-2">· {doc.chunk_count} chunks</span>
+                        )}
+                      </p>
                     </div>
                   </div>
-                  <span
-                    className={`px-3 py-1 text-xs rounded-full ${
-                      doc.status === "ready"
-                        ? "bg-green-500/20 text-green-300"
-                        : doc.status === "processing"
-                        ? "bg-yellow-500/20 text-yellow-300"
-                        : doc.status === "failed"
-                        ? "bg-red-500/20 text-red-300"
-                        : "bg-slate-500/20 text-slate-300"
-                    }`}
-                  >
-                    {doc.status}
-                  </span>
+                  <div className="flex items-center gap-2">
+                    {(doc.status === "pending" || doc.status === "failed") && (
+                      <button
+                        onClick={() => reprocessDocument(doc.id)}
+                        className="px-3 py-1 text-xs bg-purple-600 hover:bg-purple-500 rounded-full transition-colors"
+                      >
+                        Process
+                      </button>
+                    )}
+                    <span
+                      className={`px-3 py-1 text-xs rounded-full ${
+                        doc.status === "ready"
+                          ? "bg-green-500/20 text-green-300"
+                          : doc.status === "processing"
+                          ? "bg-yellow-500/20 text-yellow-300"
+                          : doc.status === "failed"
+                          ? "bg-red-500/20 text-red-300"
+                          : "bg-slate-500/20 text-slate-300"
+                      }`}
+                    >
+                      {doc.status === "ready" ? "✓ ready" : doc.status}
+                    </span>
+                  </div>
                 </div>
               ))}
             </div>
