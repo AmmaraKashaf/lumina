@@ -83,6 +83,23 @@ export default function Home() {
     }
   };
 
+  const indexDocument = async (docId: string) => {
+    try {
+      setError(null);
+      const res = await fetch(
+        `http://localhost:8000/documents/${docId}/index`,
+        { method: "POST" }
+      );
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || "Indexing failed");
+      }
+      alert("✅ Document indexed! You can now chat with it.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Index failed");
+    }
+  };
+
   return (
     <main className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-8">
       <div className="max-w-4xl mx-auto">
@@ -175,7 +192,25 @@ export default function Home() {
                       </p>
                     </div>
                   </div>
+
                   <div className="flex items-center gap-2">
+                    {doc.status === "ready" && (
+                      <>
+                        <button
+                          onClick={() => indexDocument(doc.id)}
+                          className="px-3 py-1 text-xs bg-slate-700 hover:bg-slate-600 rounded-full transition-colors"
+                          title="Re-index this document for chat"
+                        >
+                          🧠 Index
+                        </button>
+                        <a
+                          href={`/chat?doc=${doc.id}`}
+                          className="px-3 py-1 text-xs bg-gradient-to-r from-purple-600 to-cyan-600 hover:from-purple-500 hover:to-cyan-500 rounded-full transition-colors font-medium"
+                        >
+                          💬 Chat
+                        </a>
+                      </>
+                    )}
                     {(doc.status === "pending" || doc.status === "failed") && (
                       <button
                         onClick={() => reprocessDocument(doc.id)}
