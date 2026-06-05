@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.database import get_db
 from app.config import settings
+from app.routers import documents
 
 app = FastAPI(
     title="Lumina API",
@@ -19,10 +20,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Register routers
+app.include_router(documents.router)
+
 
 @app.get("/")
 def root():
-    """Health check endpoint."""
     return {
         "service": "Lumina API",
         "status": "online",
@@ -38,18 +41,8 @@ def health():
 
 @app.get("/health/db")
 def db_health(db: Session = Depends(get_db)):
-    """
-    Verifies the database connection is working.
-    Runs a simple SELECT 1 query against Supabase.
-    """
     try:
         result = db.execute(text("SELECT 1 AS test")).scalar()
-        return {
-            "database": "connected",
-            "test_query": result,
-        }
+        return {"database": "connected", "test_query": result}
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Database connection failed: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"DB error: {str(e)}")
