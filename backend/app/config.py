@@ -2,10 +2,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    """
-    Centralized config loaded from .env file.
-    Pydantic validates types automatically.
-    """
+    """Centralized config loaded from .env file."""
 
     # Supabase
     SUPABASE_URL: str
@@ -13,6 +10,12 @@ class Settings(BaseSettings):
     SUPABASE_SERVICE_KEY: str
     DATABASE_URL: str
 
+    # Qdrant
+    QDRANT_URL: str
+    QDRANT_API_KEY: str
+
+    # Hugging Face
+    HUGGINGFACE_API_KEY: str = ""  # not required anymore (local embeddings)
     # App
     ENVIRONMENT: str = "development"
 
@@ -23,5 +26,4 @@ class Settings(BaseSettings):
     )
 
 
-# Single instance imported across the app
 settings = Settings()

@@ -209,3 +209,112 @@ def process_document(
             status_code=500,
             detail=f"Processing failed: {str(e)}",
         )
+    
+@router.post("/{document_id}/index")
+def index_document(
+    document_id: str,
+    db: Session = Depends(get_db),
+):
+    """
+    Generate embeddings for all chunks of a document and store in Qdrant.
+    This is what makes the document searchable.
+    """
+    from app.services.embeddings import embed_batch
+    from app.services.vector_store import ensure_collection, upsert_chunks, delete_chunks_for_document
+
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    if document.status != "ready":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Document must be 'ready' first (current: {document.status})",
+        )
+
+    chunks = db.query(Chunk).filter(Chunk.document_id == document.id).all()
+    if not chunks:
+        raise HTTPException(status_code=400, detail="No chunks found for this document")
+
+    # Ensure Qdrant collection exists
+    ensure_collection()
+
+    # Delete any old vectors for this document (in case of re-indexing)
+    delete_chunks_for_document(str(document.id))
+
+    try:
+        # Generate embeddings (this is the slow part — ~1-2s per chunk on HF free tier)
+        print(f"🧠 Generating embeddings for {len(chunks)} chunks...")
+        contents = [c.content for c in chunks]
+        vectors = embed_batch(contents)
+
+        # Build points for Qdrant
+        points = [
+            {
+                "id": str(chunk.id),
+                "vector": vector,
+                "payload": {
+                    "document_id": str(document.id),
+                    "document_title": document.title,
+                    "content": chunk.content,
+                    "chunk_index": chunk.chunk_index,
+                    "page_number": chunk.page_number,
+                },
+            }
+            for chunk, vector in zip(chunks, vectors)
+        ]
+
+        # Upload to Qdrant
+        count = upsert_chunks(points)
+
+        return {
+            "message": "Indexing complete",
+            "document_id": str(document.id),
+            "chunks_indexed": count,
+        }
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Indexing failed: {str(e)}",
+        )
+@router.post("/{document_id}/search")
+def search_document(
+    document_id: str,
+    query: str,
+    limit: int = 5,
+    db: Session = Depends(get_db),
+):
+    """
+    Semantic search within a document.
+    Returns the chunks most relevant to the query.
+    """
+    from app.services.embeddings import embed_text
+    from app.services.vector_store import search_similar
+
+    document = db.query(Document).filter(Document.id == document_id).first()
+    if document is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    # Embed the user's query
+    query_vector = embed_text(query)
+
+    # Search Qdrant
+    results = search_similar(
+        query_vector=query_vector,
+        limit=limit,
+        document_id=str(document.id),
+    )
+
+    return {
+        "query": query,
+        "results": [
+            {
+                "score": r["score"],
+                "content": r["payload"]["content"],
+                "page": r["payload"].get("page_number"),
+                "chunk_index": r["payload"].get("chunk_index"),
+            }
+            for r in results
+        ],
+    }        
