@@ -1,51 +1,172 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState, useCallback } from "react";
 
-interface BackendStatus {
-  service: string;
+interface Document {
+  id: string;
+  title: string;
+  filename: string;
   status: string;
-  version: string;
+}
+
+interface UploadResponse extends Document {
+  signed_url: string;
 }
 
 export default function Home() {
-  const [backend, setBackend] = useState<BackendStatus | null>(null);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetch("http://localhost:8000/")
-      .then((res) => res.json())
-      .then((data) => setBackend(data))
-      .catch((err) => setError(err.message));
+  const uploadFile = async (file: File) => {
+    setError(null);
+    setUploading(true);
+
+    const formData = new FormData();
+    formData.append("file", file);
+
+    try {
+      const res = await fetch("http://localhost:8000/documents/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.detail || "Upload failed");
+      }
+
+      const data: UploadResponse = await res.json();
+      setDocuments((prev) => [data, ...prev]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    setDragActive(false);
+    const file = e.dataTransfer.files[0];
+    if (file) uploadFile(file);
   }, []);
 
-  return (
-    <main className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white flex items-center justify-center p-8">
-      <div className="max-w-2xl w-full">
-        <h1 className="text-6xl font-bold mb-4 bg-gradient-to-r from-purple-400 to-cyan-400 bg-clip-text text-transparent">
-          Lumina
-        </h1>
-        <p className="text-xl text-slate-300 mb-8">
-          AI Knowledge Studio — Transform PDFs into conversations, tutors, and videos.
-        </p>
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) uploadFile(file);
+  };
 
-        <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-xl p-6">
-          <h2 className="text-sm font-mono text-slate-400 mb-3">BACKEND STATUS</h2>
-          {error && (
-            <p className="text-red-400">❌ Backend unreachable: {error}</p>
-          )}
-          {!error && !backend && (
-            <p className="text-yellow-400">⏳ Connecting...</p>
-          )}
-          {backend && (
-            <div className="space-y-2">
-              <p className="text-green-400">✅ Connected to {backend.service}</p>
-              <p className="text-slate-400 text-sm">
-                Status: <span className="text-white">{backend.status}</span>
-              </p>
-              <p className="text-slate-400 text-sm">
-                Version: <span className="text-white">{backend.version}</span>
-              </p>
+  const loadDocuments = async () => {
+    try {
+      const res = await fetch("http://localhost:8000/documents/");
+      const data = await res.json();
+      setDocuments(data);
+    } catch (err) {
+      console.error("Failed to load documents:", err);
+    }
+  };
+
+  return (
+    <main className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white p-8">
+      <div className="max-w-4xl mx-auto">
+        {/* Header */}
+        <div className="mb-12 text-center">
+          <h1 className="text-6xl font-bold mb-4 bg-gradient-to-r from-purple-400 to-cyan-400 bg-clip-text text-transparent">
+            Lumina
+          </h1>
+          <p className="text-xl text-slate-300">
+            Upload a PDF to start your knowledge journey
+          </p>
+        </div>
+
+        {/* Upload Zone */}
+        <div
+          onDragOver={(e) => {
+            e.preventDefault();
+            setDragActive(true);
+          }}
+          onDragLeave={() => setDragActive(false)}
+          onDrop={handleDrop}
+          className={`
+            relative border-2 border-dashed rounded-2xl p-12 text-center transition-all
+            ${dragActive ? "border-purple-400 bg-purple-500/10" : "border-slate-600 bg-slate-800/30"}
+            ${uploading ? "opacity-50 pointer-events-none" : "hover:border-purple-500 hover:bg-slate-800/50"}
+          `}
+        >
+          <input
+            type="file"
+            accept="application/pdf"
+            onChange={handleFileSelect}
+            disabled={uploading}
+            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+          />
+          <div className="pointer-events-none">
+            <div className="text-5xl mb-4">{uploading ? "⏳" : "📄"}</div>
+            <p className="text-xl font-medium mb-2">
+              {uploading
+                ? "Uploading..."
+                : dragActive
+                ? "Drop your PDF here"
+                : "Drag a PDF here or click to browse"}
+            </p>
+            <p className="text-sm text-slate-400">Max 50 MB · PDF only</p>
+          </div>
+        </div>
+
+        {/* Error message */}
+        {error && (
+          <div className="mt-4 p-4 bg-red-500/10 border border-red-500/30 rounded-lg text-red-300">
+            ❌ {error}
+          </div>
+        )}
+
+        {/* Documents List */}
+        <div className="mt-12">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-2xl font-semibold">Your Documents</h2>
+            <button
+              onClick={loadDocuments}
+              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 rounded-lg text-sm transition-colors"
+            >
+              🔄 Refresh
+            </button>
+          </div>
+
+          {documents.length === 0 ? (
+            <p className="text-slate-400 text-center py-8">
+              No documents yet. Upload one above to get started.
+            </p>
+          ) : (
+            <div className="space-y-3">
+              {documents.map((doc) => (
+                <div
+                  key={doc.id}
+                  className="flex items-center justify-between p-4 bg-slate-800/50 border border-slate-700 rounded-lg hover:border-purple-500/50 transition-colors"
+                >
+                  <div className="flex items-center gap-4">
+                    <div className="text-2xl">📄</div>
+                    <div>
+                      <p className="font-medium">{doc.title}</p>
+                      <p className="text-xs text-slate-400">{doc.filename}</p>
+                    </div>
+                  </div>
+                  <span
+                    className={`px-3 py-1 text-xs rounded-full ${
+                      doc.status === "ready"
+                        ? "bg-green-500/20 text-green-300"
+                        : doc.status === "processing"
+                        ? "bg-yellow-500/20 text-yellow-300"
+                        : doc.status === "failed"
+                        ? "bg-red-500/20 text-red-300"
+                        : "bg-slate-500/20 text-slate-300"
+                    }`}
+                  >
+                    {doc.status}
+                  </span>
+                </div>
+              ))}
             </div>
           )}
         </div>
