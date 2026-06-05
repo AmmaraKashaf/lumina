@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy import text
 from app.database import get_db
 from app.config import settings
-from app.routers import documents, chat, conversations
+from app.routers import documents, chat, conversations, learning
 
 app = FastAPI(
     title="Lumina API",
@@ -24,6 +24,7 @@ app.add_middleware(
 app.include_router(documents.router)
 app.include_router(chat.router)
 app.include_router(conversations.router)
+app.include_router(learning.router)
 
 
 @app.get("/")
