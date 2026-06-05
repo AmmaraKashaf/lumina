@@ -16,6 +16,9 @@ class Settings(BaseSettings):
 
     # Hugging Face
     HUGGINGFACE_API_KEY: str = ""  # not required anymore (local embeddings)
+
+    # Groq (free LLM)
+    GROQ_API_KEY: str
     # App
     ENVIRONMENT: str = "development"
 
