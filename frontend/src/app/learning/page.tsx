@@ -26,7 +26,7 @@ interface Flashcard {
 type Tab = "summary" | "quiz" | "flashcards";
 type SummaryStyle = "tldr" | "executive" | "detailed" | "eli5";
 
-const API = "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 const STYLE_LABELS: Record<SummaryStyle, { label: string; desc: string }> = {
   tldr: { label: "TL;DR", desc: "2-3 sentences" },

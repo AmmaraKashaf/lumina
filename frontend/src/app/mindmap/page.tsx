@@ -48,7 +48,7 @@ interface MindMapResponse {
   created_at: string;
 }
 
-const API = "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 const LEVEL_COLORS: Record<number, { bg: string; border: string; text: string }> = {
   0: { bg: "rgb(168 85 247 / 0.25)", border: "rgb(168 85 247)", text: "#fff" },
