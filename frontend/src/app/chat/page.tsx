@@ -43,13 +43,104 @@ export default function ChatPage() {
   const [streaming, setStreaming] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [openSource, setOpenSource] = useState<{ msgIdx: number; srcIdx: number } | null>(null);
+  const [listening, setListening] = useState(false);
+  const [voiceSupported, setVoiceSupported] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
 
+  const recognitionRef = useRef<any>(null);
+  const selectedDocIdRef = useRef<string>(selectedDocId);
+  const activeConvIdRef = useRef<string | null>(activeConvId);
+  const inputRef = useRef<string>(input);
+  const streamingRef = useRef<boolean>(streaming);
+  const assistantMessageIndexRef = useRef<number | null>(null);
+  const finalTranscriptRef = useRef<string>("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isVoiceInputRef = useRef<boolean>(false);
 
   // Auto-scroll on new messages
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, streaming]);
+
+  useEffect(() => {
+    const SpeechRecognition =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+      setVoiceSupported(false);
+      return;
+    }
+
+    setVoiceSupported(true);
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = true;
+    recognition.maxAlternatives = 1;
+    recognition.continuous = false;
+
+    recognition.onresult = (event: any) => {
+      let interimTranscript = "";
+      let finalTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        const transcript = result[0]?.transcript || "";
+        if (result.isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      if (finalTranscript) {
+        finalTranscriptRef.current = finalTranscript;
+        setInput(finalTranscript);
+      } else {
+        setInput(interimTranscript);
+      }
+    };
+
+    recognition.onend = () => {
+      setListening(false);
+      const transcript = finalTranscriptRef.current.trim() || inputRef.current.trim();
+      if (transcript) {
+        void sendMessage(transcript, true);
+      }
+      finalTranscriptRef.current = "";
+    };
+
+    recognition.onerror = (event: any) => {
+      setError("Voice recognition error: " + (event.error || "unknown"));
+      setListening(false);
+    };
+
+    recognitionRef.current = recognition;
+
+    return () => {
+      recognition.stop?.();
+    };
+  }, []);
+
+  const speakText = useCallback((text: string) => {
+    if (!("speechSynthesis" in window) || !text.trim()) return;
+
+    const speech = new SpeechSynthesisUtterance(text);
+    speech.lang = "en-US";
+
+    const voices = window.speechSynthesis.getVoices();
+    const voice = voices.find((v) => v.lang.startsWith("en"));
+    if (voice) {
+      speech.voice = voice;
+    }
+
+    speech.onstart = () => setSpeaking(true);
+    speech.onend = () => setSpeaking(false);
+    speech.onerror = () => setSpeaking(false);
+
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(speech);
+  }, []);
 
   // Load ready documents
   useEffect(() => {
@@ -76,6 +167,22 @@ export default function ChatPage() {
   }, []);
 
   useEffect(() => {
+    selectedDocIdRef.current = selectedDocId;
+  }, [selectedDocId]);
+
+  useEffect(() => {
+    activeConvIdRef.current = activeConvId;
+  }, [activeConvId]);
+
+  useEffect(() => {
+    inputRef.current = input;
+  }, [input]);
+
+  useEffect(() => {
+    streamingRef.current = streaming;
+  }, [streaming]);
+
+  useEffect(() => {
     if (selectedDocId) loadConversations(selectedDocId);
   }, [selectedDocId, loadConversations]);
 
@@ -85,11 +192,27 @@ export default function ChatPage() {
       setMessages([]);
       return;
     }
+    // Don't load from backend while streaming locally
+    if (streamingRef.current) {
+      return;
+    }
     fetch(`${API}/conversations/${activeConvId}`)
       .then((res) => res.json())
       .then((data) => setMessages(data.messages || []))
       .catch((err) => setError("Failed to load messages: " + err.message));
   }, [activeConvId]);
+
+  // ─── Stop assistant ──────────────────────────────────────────
+  const stopAssistant = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+    window.speechSynthesis.cancel();
+    setStreaming(false);
+    setLoading(false);
+    setSpeaking(false);
+  };
 
   // ─── New conversation ─────────────────────────────────────────
   const newConversation = () => {
@@ -97,52 +220,68 @@ export default function ChatPage() {
     setMessages([]);
     setOpenSource(null);
     setError(null);
+    assistantMessageIndexRef.current = null;
   };
 
   // ─── Send message with streaming ──────────────────────────────
-  const sendMessage = async () => {
-    if (!input.trim() || streaming) return;
-    if (!selectedDocId) {
+  const sendMessage = async (messageOverride?: string, isVoice: boolean = false) => {
+    const question = messageOverride?.trim() || inputRef.current.trim();
+    if (!question || streamingRef.current) return;
+    const docId = selectedDocIdRef.current || selectedDocId;
+    if (!docId) {
       setError("Please select a document first");
       return;
     }
 
-    const question = input.trim();
+    isVoiceInputRef.current = isVoice;
     setInput("");
     setError(null);
 
     // Ensure a conversation exists
-    let convId = activeConvId;
+    let convId = activeConvIdRef.current || activeConvId;
     if (!convId) {
       try {
         const res = await fetch(`${API}/conversations/`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ document_id: selectedDocId }),
+          body: JSON.stringify({ document_id: docId }),
         });
+        if (!res.ok) {
+          const errData = await res.json().catch(() => null);
+          const detail = errData?.detail || errData?.message || res.statusText || "Failed to create conversation";
+          throw new Error(detail);
+        }
         const conv: Conversation = await res.json();
         convId = conv.id;
         setActiveConvId(convId);
       } catch (err) {
-        setError("Failed to create conversation");
+        setError(err instanceof Error ? err.message : "Failed to create conversation");
         return;
       }
     }
 
     // Optimistically add user message + empty assistant placeholder
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: question },
-      { role: "assistant", content: "", sources: [] },
-    ]);
+    setMessages((prev) => {
+      const updated: Message[] = [
+        ...prev,
+        { role: "user", content: question },
+        { role: "assistant", content: "", sources: [] },
+      ];
+      assistantMessageIndexRef.current = updated.length - 1;
+      return updated;
+    });
     setStreaming(true);
     setLoading(true);
 
     try {
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
       const res = await fetch(`${API}/conversations/${convId}/messages/stream`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ content: question, top_k: 5 }),
+        signal: abortController.signal,
       });
 
       if (!res.ok || !res.body) {
@@ -152,6 +291,7 @@ export default function ChatPage() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = "";
+      let assistantText = "";
 
       while (true) {
         const { done, value } = await reader.read();
@@ -175,20 +315,29 @@ export default function ChatPage() {
               setLoading(false);
               setMessages((prev) => {
                 const updated = [...prev];
-                const lastIdx = updated.length - 1;
-                updated[lastIdx] = {
-                  ...updated[lastIdx],
+                let assistantIdx = assistantMessageIndexRef.current ?? updated.length - 1;
+                if (assistantIdx < 0 || assistantIdx >= updated.length || !updated[assistantIdx]) {
+                  assistantIdx = updated.length - 1;
+                }
+                if (!updated[assistantIdx]) return updated;
+                updated[assistantIdx] = {
+                  ...updated[assistantIdx],
                   sources: event.data,
                 };
                 return updated;
               });
             } else if (event.type === "token") {
+              assistantText += event.data;
               setMessages((prev) => {
                 const updated = [...prev];
-                const lastIdx = updated.length - 1;
-                updated[lastIdx] = {
-                  ...updated[lastIdx],
-                  content: updated[lastIdx].content + event.data,
+                let assistantIdx = assistantMessageIndexRef.current ?? updated.length - 1;
+                if (assistantIdx < 0 || assistantIdx >= updated.length || !updated[assistantIdx]) {
+                  assistantIdx = updated.length - 1;
+                }
+                if (!updated[assistantIdx]) return updated;
+                updated[assistantIdx] = {
+                  ...updated[assistantIdx],
+                  content: updated[assistantIdx].content + event.data,
                 };
                 return updated;
               });
@@ -200,14 +349,43 @@ export default function ChatPage() {
           }
         }
       }
+      if (assistantText.trim()) {
+        if (isVoiceInputRef.current) {
+          speakText(assistantText);
+        }
+      }
 
       // Refresh conversation list (titles update after first message)
       if (selectedDocId) loadConversations(selectedDocId);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Chat failed");
+      if (err instanceof Error && err.name !== "AbortError") {
+        setError(err.message);
+      }
     } finally {
+      abortControllerRef.current = null;
       setStreaming(false);
       setLoading(false);
+    }
+  };
+
+  const toggleListening = () => {
+    if (!voiceSupported || streaming || !selectedDocId) return;
+    const recognition = recognitionRef.current;
+    if (!recognition) return;
+
+    if (listening) {
+      recognition.stop();
+      setListening(false);
+      return;
+    }
+
+    finalTranscriptRef.current = "";
+    setListening(true);
+    try {
+      recognition.start();
+    } catch (err) {
+      setError("Failed to start voice input");
+      setListening(false);
     }
   };
 
@@ -326,71 +504,73 @@ export default function ChatPage() {
             )}
 
             <div className="space-y-6">
-              {messages.map((msg, msgIdx) => (
-                <div
-                  key={msgIdx}
-                  className={`flex ${
-                    msg.role === "user" ? "justify-end" : "justify-start"
-                  }`}
-                >
-                  <div className="max-w-2xl">
-                    <div
-                      className={`rounded-2xl px-5 py-3 ${
-                        msg.role === "user"
-                          ? "bg-purple-600 text-white"
-                          : "bg-slate-800/70 border border-slate-700 text-slate-100"
-                      }`}
-                    >
-                      {msg.content === "" && msg.role === "assistant" && loading ? (
-                        <div className="flex gap-1 py-1">
-                          <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" />
-                          <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                          <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+              {messages.map((msg, msgIdx) =>
+                msg && (msg as Message).role != null ? (
+                  <div
+                    key={msgIdx}
+                    className={`flex ${
+                      msg.role === "user" ? "justify-end" : "justify-start"
+                    }`}
+                  >
+                    <div className="max-w-2xl">
+                      <div
+                        className={`rounded-2xl px-5 py-3 ${
+                          msg.role === "user"
+                            ? "bg-purple-600 text-white"
+                            : "bg-slate-800/70 border border-slate-700 text-slate-100"
+                        }`}
+                      >
+                        {msg.content === "" && msg.role === "assistant" && loading ? (
+                          <div className="flex gap-1 py-1">
+                            <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" />
+                            <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                            <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                          </div>
+                        ) : (
+                          <p className="whitespace-pre-wrap leading-relaxed">
+                            {msg.content}
+                            {streaming && msgIdx === messages.length - 1 && msg.role === "assistant" && (
+                              <span className="inline-block w-2 h-4 ml-0.5 bg-purple-400 animate-pulse" />
+                            )}
+                          </p>
+                        )}
+                      </div>
+
+                      {msg.sources && msg.sources.length > 0 && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {msg.sources.map((src, srcIdx) => (
+                            <button
+                              key={srcIdx}
+                              onClick={() =>
+                                setOpenSource(
+                                  openSource?.msgIdx === msgIdx &&
+                                    openSource?.srcIdx === srcIdx
+                                    ? null
+                                    : { msgIdx, srcIdx }
+                                )
+                              }
+                              className="text-xs px-3 py-1 bg-slate-700/50 hover:bg-slate-700 border border-slate-600 rounded-full transition-colors"
+                            >
+                              Page {src.page ?? "?"} · {(src.score * 100).toFixed(0)}%
+                            </button>
+                          ))}
                         </div>
-                      ) : (
-                        <p className="whitespace-pre-wrap leading-relaxed">
-                          {msg.content}
-                          {streaming && msgIdx === messages.length - 1 && msg.role === "assistant" && (
-                            <span className="inline-block w-2 h-4 ml-0.5 bg-purple-400 animate-pulse" />
-                          )}
-                        </p>
+                      )}
+
+                      {openSource?.msgIdx === msgIdx && msg.sources && (
+                        <div className="mt-3 p-4 bg-slate-900/80 border border-purple-500/30 rounded-lg text-sm text-slate-300">
+                          <p className="text-xs text-purple-400 mb-2 font-mono">
+                            SOURCE · Page {msg.sources[openSource.srcIdx].page}
+                          </p>
+                          <p className="whitespace-pre-wrap leading-relaxed text-slate-300">
+                            {msg.sources[openSource.srcIdx].content}
+                          </p>
+                        </div>
                       )}
                     </div>
-
-                    {msg.sources && msg.sources.length > 0 && (
-                      <div className="mt-3 flex flex-wrap gap-2">
-                        {msg.sources.map((src, srcIdx) => (
-                          <button
-                            key={srcIdx}
-                            onClick={() =>
-                              setOpenSource(
-                                openSource?.msgIdx === msgIdx &&
-                                  openSource?.srcIdx === srcIdx
-                                  ? null
-                                  : { msgIdx, srcIdx }
-                              )
-                            }
-                            className="text-xs px-3 py-1 bg-slate-700/50 hover:bg-slate-700 border border-slate-600 rounded-full transition-colors"
-                          >
-                            Page {src.page ?? "?"} · {(src.score * 100).toFixed(0)}%
-                          </button>
-                        ))}
-                      </div>
-                    )}
-
-                    {openSource?.msgIdx === msgIdx && msg.sources && (
-                      <div className="mt-3 p-4 bg-slate-900/80 border border-purple-500/30 rounded-lg text-sm text-slate-300">
-                        <p className="text-xs text-purple-400 mb-2 font-mono">
-                          SOURCE · Page {msg.sources[openSource.srcIdx].page}
-                        </p>
-                        <p className="whitespace-pre-wrap leading-relaxed text-slate-300">
-                          {msg.sources[openSource.srcIdx].content}
-                        </p>
-                      </div>
-                    )}
                   </div>
-                </div>
-              ))}
+                ) : null
+              )}
 
               <div ref={messagesEndRef} />
             </div>
@@ -418,7 +598,24 @@ export default function ChatPage() {
                 className="flex-1 bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 resize-none focus:outline-none focus:border-purple-500 disabled:opacity-50 max-h-32"
               />
               <button
-                onClick={sendMessage}
+                type="button"
+                onClick={toggleListening}
+                disabled={!voiceSupported || streaming || !selectedDocId}
+                className="px-4 py-3 bg-slate-800 border border-slate-700 rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {listening ? "Stop" : "🎙️ Speak"}
+              </button>
+              {(streaming || speaking) && (
+                <button
+                  type="button"
+                  onClick={stopAssistant}
+                  className="px-4 py-3 bg-red-900/50 border border-red-500/50 hover:bg-red-900 hover:border-red-500 rounded-xl text-red-300 transition-colors"
+                >
+                  ⏹ Stop
+                </button>
+              )}
+              <button
+                onClick={() => void sendMessage()}
                 disabled={streaming || !input.trim() || !selectedDocId}
                 className="px-5 py-3 bg-gradient-to-r from-purple-600 to-cyan-600 hover:from-purple-500 hover:to-cyan-500 rounded-xl font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-all"
               >
@@ -426,7 +623,7 @@ export default function ChatPage() {
               </button>
             </div>
             <p className="text-xs text-slate-500 mt-2 text-center">
-              Press Enter to send · Shift+Enter for new line
+              Press Enter to send · Shift+Enter for new line · Use voice for spoken questions
             </p>
           </div>
         </div>
