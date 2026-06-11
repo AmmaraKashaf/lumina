@@ -1,10 +1,12 @@
 """
-Chat endpoints — ask questions about PDFs.
+Chat endpoints — ask questions about PDFs (stateless, non-streaming).
 """
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Optional, List
+from sqlalchemy.orm import Session
+from app.database import get_db
 from app.services.rag import answer_question
 
 
@@ -29,13 +31,14 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/", response_model=ChatResponse)
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, db: Session = Depends(get_db)):
     """Ask a question. Returns AI answer grounded in document chunks."""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
 
     try:
         result = answer_question(
+            db=db,
             question=request.question,
             document_id=request.document_id,
             top_k=request.top_k,

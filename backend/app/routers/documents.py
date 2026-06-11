@@ -2,15 +2,69 @@
 Document endpoints: upload (with auto-processing), list, reprocess.
 """
 
-from fastapi import APIRouter, Depends, UploadFile, File, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, HTTPException, Response, status
 from sqlalchemy.orm import Session
-from app.database import get_db
+from app.database import get_db, SessionLocal
 from app.models import Document, User, Chunk
-from app.services.storage import upload_pdf, download_pdf
+from app.services.storage import upload_pdf, download_pdf, delete_pdf
 from app.services.pdf_parser import parse_pdf
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+
+
+def _index_in_background(document_id: str) -> None:
+    """Embed all chunks for a document and upsert them to Qdrant (runs as a background task)."""
+    from app.services.embeddings import embed_batch
+    from app.services.vector_store import delete_chunks_for_document, ensure_collection, upsert_chunks
+
+    db = SessionLocal()
+    try:
+        document = db.query(Document).filter(Document.id == document_id).first()
+        if not document:
+            return
+
+        chunks = db.query(Chunk).filter(Chunk.document_id == document.id).all()
+        if not chunks:
+            document.status = "ready"
+            db.commit()
+            return
+
+        ensure_collection()
+        delete_chunks_for_document(document_id)
+
+        vectors = embed_batch([c.content for c in chunks])
+        points = [
+            {
+                "id": str(chunk.id),
+                "vector": vector,
+                "payload": {
+                    "document_id": document_id,
+                    "document_title": document.title,
+                    "content": chunk.content,
+                    "chunk_index": chunk.chunk_index,
+                    "page_number": chunk.page_number,
+                },
+            }
+            for chunk, vector in zip(chunks, vectors)
+        ]
+        upsert_chunks(points)
+
+        document.status = "ready"
+        db.commit()
+        print(f"✅  Auto-indexing complete for {document_id} ({len(chunks)} chunks)")
+
+    except Exception as exc:
+        print(f"⚠️  Auto-indexing failed for {document_id}: {exc}")
+        try:
+            doc = db.query(Document).filter(Document.id == document_id).first()
+            if doc:
+                doc.status = "index_failed"
+                db.commit()
+        except Exception:
+            pass
+    finally:
+        db.close()
 
 # Temporary hardcoded user — we'll replace with real auth in Step 12
 TEST_USER_EMAIL = "test@lumina.dev"
@@ -27,15 +81,67 @@ def get_or_create_test_user(db: Session) -> User:
     return user
 
 
+@router.get("/{document_id}/status")
+def get_document_status(document_id: str, db: Session = Depends(get_db)):
+    """Poll the processing/indexing status of a document."""
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"document_id": document_id, "status": doc.status, "page_count": doc.page_count}
+
+
+def _cleanup_after_delete(document_id: str, file_url: str | None) -> None:
+    """Background task: remove Qdrant vectors and the Storage file after the DB record is gone."""
+    from app.services.vector_store import delete_chunks_for_document
+
+    try:
+        delete_chunks_for_document(document_id)
+    except Exception as exc:
+        print(f"⚠️  Qdrant cleanup failed for {document_id}: {exc}")
+
+    if file_url:
+        try:
+            delete_pdf(file_url)
+        except Exception as exc:
+            print(f"⚠️  Storage cleanup failed for {document_id}: {exc}")
+
+
+@router.delete("/{document_id}", status_code=204)
+def delete_document(
+    document_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """
+    Instantly delete a document then clean up Qdrant vectors + Storage file in the background.
+    DB-level CASCADE handles chunks → conversations → messages automatically.
+    """
+    doc = db.query(Document).filter(Document.id == document_id).first()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+
+    file_url = doc.file_url
+
+    # Direct SQL DELETE — lets the DB CASCADE handle child rows without loading them into ORM.
+    db.query(Document).filter(Document.id == document_id).delete(synchronize_session=False)
+    db.commit()
+
+    # Qdrant + Storage cleanup runs after the response is sent — user never waits for it.
+    background_tasks.add_task(_cleanup_after_delete, document_id, file_url)
+
+    return Response(status_code=204)
+
+
 @router.post("/upload", status_code=status.HTTP_201_CREATED)
 async def upload_document(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
     """
     Upload a PDF document.
     Validates file type, stores in Supabase Storage, creates DB record,
-    then automatically parses and chunks the PDF in the same request.
+    parses and chunks the PDF, then auto-indexes embeddings in the background.
     """
     # Validate content type
     if file.content_type != "application/pdf":
@@ -83,8 +189,9 @@ async def upload_document(
     db.commit()
     db.refresh(document)
 
-    # Auto-process: parse PDF + create chunks
+    # Parse PDF + create chunks (synchronous), then kick off background indexing
     chunk_count = 0
+    processing_ok = False
     try:
         result = parse_pdf(file_bytes)  # reuse bytes already in memory
 
@@ -100,16 +207,19 @@ async def upload_document(
         db.bulk_save_objects(chunk_objects)
 
         document.page_count = result["page_count"]
-        document.status = "ready"
+        document.status = "indexing"   # background task will flip this to "ready"
         db.commit()
         db.refresh(document)
 
         chunk_count = len(result["chunks"])
+        processing_ok = True
     except Exception as e:
         document.status = "failed"
         db.commit()
-        # Don't fail the upload — file is saved, processing can be retried
         print(f"⚠️  Processing failed for {document.id}: {e}")
+
+    if processing_ok:
+        background_tasks.add_task(_index_in_background, str(document.id))
 
     return {
         "id": str(document.id),

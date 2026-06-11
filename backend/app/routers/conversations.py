@@ -200,18 +200,25 @@ def send_message_stream(
     document_id = str(conv.document_id)
     question = request.content
     conv_id = str(conv.id)
+    top_k = request.top_k
 
     def event_stream():
-        """Generator that yields SSE-formatted events + saves the final answer."""
+        """
+        Generator that yields SSE events and saves the final assistant message.
+        Uses a dedicated DB session because the request-scoped one closes
+        before this generator finishes streaming.
+        """
         full_answer = ""
         captured_sources = []
+        stream_db = SessionLocal()
 
         try:
             for event in answer_question_stream(
+                db=stream_db,
                 question=question,
                 document_id=document_id,
                 history=history_for_llm,
-                top_k=request.top_k,
+                top_k=top_k,
             ):
                 if event["type"] == "sources":
                     captured_sources = event["data"]
@@ -222,12 +229,10 @@ def send_message_stream(
         except Exception as e:
             err_event = {"type": "error", "data": str(e)}
             yield f"data: {json.dumps(err_event)}\n\n"
+            stream_db.close()
             return
 
         # Persist the assistant message after stream completes
-        # NOTE: we open a fresh DB session because the request-scoped one
-        # is already closed by the time this generator finishes.
-        new_db = SessionLocal()
         try:
             asst_msg = Message(
                 conversation_id=conv_id,
@@ -235,10 +240,10 @@ def send_message_stream(
                 content=full_answer,
                 sources=captured_sources,
             )
-            new_db.add(asst_msg)
-            new_db.commit()
+            stream_db.add(asst_msg)
+            stream_db.commit()
         finally:
-            new_db.close()
+            stream_db.close()
 
     return StreamingResponse(
         event_stream(),
