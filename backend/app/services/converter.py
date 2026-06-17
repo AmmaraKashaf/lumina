@@ -63,11 +63,6 @@ def _find_soffice() -> str | None:
     return None
 
 
-def _win_path_to_file_uri(path: str) -> str:
-    """Convert a Windows absolute path to a file:/// URI for LibreOffice."""
-    return "file:///" + path.replace("\\", "/")
-
-
 def _convert_via_libreoffice(docx_bytes: bytes) -> bytes:
     soffice = _find_soffice()
     if not soffice:
@@ -76,19 +71,14 @@ def _convert_via_libreoffice(docx_bytes: bytes) -> bytes:
     with tempfile.TemporaryDirectory() as tmpdir:
         docx_path = os.path.join(tmpdir, "document.docx")
         pdf_path  = os.path.join(tmpdir, "document.pdf")
-        profile   = os.path.join(tmpdir, "lo_profile")
 
         with open(docx_path, "wb") as fh:
             fh.write(docx_bytes)
 
-        # --env:UserInstallation avoids profile-lock conflicts under concurrent calls
-        profile_uri = _win_path_to_file_uri(profile)
         cmd = [
             soffice,
             "--headless",
             "--norestore",
-            "--nofirststartwizard",
-            f"--env:UserInstallation={profile_uri}",
             "--convert-to", "pdf",
             "--outdir", tmpdir,
             docx_path,
@@ -101,9 +91,9 @@ def _convert_via_libreoffice(docx_bytes: bytes) -> bytes:
             text=True,
         )
 
-        if result.returncode != 0 or not Path(pdf_path).is_file():
+        if not Path(pdf_path).is_file():
             err = (result.stderr or result.stdout or "no output").strip()
-            raise RuntimeError(f"LibreOffice exited {result.returncode}: {err}")
+            raise RuntimeError(f"LibreOffice failed (exit {result.returncode}): {err[:300]}")
 
         return Path(pdf_path).read_bytes()
 
