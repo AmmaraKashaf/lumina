@@ -49,9 +49,15 @@ def _find_soffice() -> str | None:
     if Path(mac).is_file():
         return mac
 
-    # Linux snap / flatpak
-    for candidate in ("/snap/bin/libreoffice", "/usr/bin/libreoffice", "/usr/bin/soffice"):
-        if Path(candidate).is_file():
+    # Linux — common install locations including apt/snap/flatpak
+    for candidate in (
+        "/usr/lib/libreoffice/program/soffice",
+        "/usr/bin/soffice",
+        "/usr/bin/libreoffice",
+        "/snap/bin/libreoffice",
+        "/opt/libreoffice/program/soffice",
+    ):
+        if Path(candidate).exists():
             return candidate
 
     return None
