@@ -18,7 +18,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class ChatRequest(BaseModel):
     question: str
     document_id: Optional[str] = None
-    top_k: int = 5
+    top_k: int = 10
 
 
 class Source(BaseModel):

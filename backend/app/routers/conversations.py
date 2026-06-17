@@ -47,7 +47,7 @@ class ConversationDetail(ConversationOut):
 
 class SendMessageRequest(BaseModel):
     content: str
-    top_k: int = 5
+    top_k: int = 10
 
 
 # ─── Helpers ────────────────────────────────────────────────────────────
