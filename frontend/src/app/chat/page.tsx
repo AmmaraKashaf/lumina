@@ -225,7 +225,7 @@ export default function ChatPage() {
 
       const res = await apiFetch(`/conversations/${convId}/messages/stream`, {
         method: "POST",
-        body: JSON.stringify({ content: question, top_k: 5 }),
+        body: JSON.stringify({ content: question, top_k: 10 }),
         signal: abortController.signal,
       });
 
@@ -268,7 +268,9 @@ export default function ChatPage() {
             } else if (event.type === "error") {
               throw new Error(event.data);
             }
-          } catch { /* parse error, skip */ }
+          } catch (err) {
+            if (!(err instanceof SyntaxError)) throw err;
+          }
         }
       }
 
@@ -444,7 +446,7 @@ export default function ChatPage() {
                           ? "bg-purple-600 text-white"
                           : "bg-slate-800/70 border border-slate-700 text-slate-100"
                       }`}>
-                        {msg.content === "" && msg.role === "assistant" && loading ? (
+                        {msg.content === "" && msg.role === "assistant" && (loading || streaming) ? (
                           <div className="flex gap-1 py-1">
                             <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" />
                             <span className="w-2 h-2 bg-purple-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
