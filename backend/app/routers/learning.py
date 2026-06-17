@@ -1,5 +1,6 @@
 """
 Learning endpoints — summaries, quizzes, flashcards.
+Users can only generate learning content for documents they own.
 """
 
 from typing import List, Literal, Optional
@@ -7,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from app.database import get_db
-from app.models import Document
+from app.models import Document, User
+from app.auth import get_current_user
 from app.services.learning import (
     generate_summary,
     generate_quiz,
@@ -68,9 +70,12 @@ class FlashcardResponse(BaseModel):
 
 # ─── Helpers ──────────────────────────────────────────────────────────
 
-def _ensure_document_ready(db: Session, document_id: str) -> Document:
-    """Validate that the document exists and is processed."""
-    document = db.query(Document).filter(Document.id == document_id).first()
+def _ensure_owned_and_ready(db: Session, document_id: str, user: User) -> Document:
+    """Validate that the document exists, belongs to this user, and is ready."""
+    document = db.query(Document).filter(
+        Document.id == document_id,
+        Document.user_id == user.id,
+    ).first()
     if document is None:
         raise HTTPException(status_code=404, detail="Document not found")
     if document.status != "ready":
@@ -84,9 +89,13 @@ def _ensure_document_ready(db: Session, document_id: str) -> Document:
 # ─── Endpoints ────────────────────────────────────────────────────────
 
 @router.post("/summary", response_model=SummaryResponse)
-def create_summary(request: SummaryRequest, db: Session = Depends(get_db)):
+def create_summary(
+    request: SummaryRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Generate a summary in the requested style."""
-    _ensure_document_ready(db, request.document_id)
+    _ensure_owned_and_ready(db, request.document_id, current_user)
 
     try:
         summary = generate_summary(db, request.document_id, style=request.style)
@@ -100,19 +109,19 @@ def create_summary(request: SummaryRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/quiz", response_model=QuizResponse)
-def create_quiz(request: QuizRequest, db: Session = Depends(get_db)):
+def create_quiz(
+    request: QuizRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Generate a multiple-choice quiz."""
-    _ensure_document_ready(db, request.document_id)
+    _ensure_owned_and_ready(db, request.document_id, current_user)
 
     try:
         questions = generate_quiz(db, request.document_id, num_questions=request.num_questions)
         if not questions:
             raise HTTPException(status_code=500, detail="LLM returned no questions")
-
-        return QuizResponse(
-            document_id=request.document_id,
-            questions=questions,
-        )
+        return QuizResponse(document_id=request.document_id, questions=questions)
     except HTTPException:
         raise
     except Exception as e:
@@ -120,19 +129,19 @@ def create_quiz(request: QuizRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/flashcards", response_model=FlashcardResponse)
-def create_flashcards(request: FlashcardRequest, db: Session = Depends(get_db)):
+def create_flashcards(
+    request: FlashcardRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Generate study flashcards."""
-    _ensure_document_ready(db, request.document_id)
+    _ensure_owned_and_ready(db, request.document_id, current_user)
 
     try:
         cards = generate_flashcards(db, request.document_id, num_cards=request.num_cards)
         if not cards:
             raise HTTPException(status_code=500, detail="LLM returned no flashcards")
-
-        return FlashcardResponse(
-            document_id=request.document_id,
-            flashcards=cards,
-        )
+        return FlashcardResponse(document_id=request.document_id, flashcards=cards)
     except HTTPException:
         raise
     except Exception as e:

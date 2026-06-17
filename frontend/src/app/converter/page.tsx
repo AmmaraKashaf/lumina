@@ -1,8 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+import { apiFetch } from "@/lib/api";
 
 type PageStatus = "idle" | "uploading" | "indexing" | "ready" | "failed";
 
@@ -123,7 +122,7 @@ export default function ConverterPage() {
     stopPolling();
     pollRef.current = setInterval(async () => {
       try {
-        const res  = await fetch(`${API}/converter/${documentId}/status`);
+        const res  = await apiFetch(`/converter/${documentId}/status`);
         const data = await res.json();
         if (data.status === "ready") {
           setPageStatus("ready");
@@ -146,7 +145,7 @@ export default function ConverterPage() {
     form.append("file", file);
 
     try {
-      const res = await fetch(`${API}/converter/upload`, { method: "POST", body: form });
+      const res = await apiFetch("/converter/upload", { method: "POST", body: form });
       if (!res.ok) {
         const err = await res.json();
         throw new Error(err.detail || "Upload failed");

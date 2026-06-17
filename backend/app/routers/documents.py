@@ -1,11 +1,13 @@
 """
-Document endpoints: upload (with auto-processing), list, reprocess.
+Document endpoints: upload (with auto-processing), list, delete, reprocess.
+All endpoints require a valid Supabase JWT — every user sees only their own data.
 """
 
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, HTTPException, Response, status
 from sqlalchemy.orm import Session
 from app.database import get_db, SessionLocal
 from app.models import Document, User, Chunk
+from app.auth import get_current_user
 from app.services.storage import upload_pdf, download_pdf, delete_pdf
 from app.services.pdf_parser import parse_pdf
 
@@ -14,7 +16,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 def _index_in_background(document_id: str) -> None:
-    """Embed all chunks for a document and upsert them to Qdrant (runs as a background task)."""
+    """Embed all chunks and upsert them to Qdrant (background task, no auth needed)."""
     from app.services.embeddings import embed_batch
     from app.services.vector_store import delete_chunks_for_document, ensure_collection, upsert_chunks
 
@@ -40,6 +42,7 @@ def _index_in_background(document_id: str) -> None:
                 "vector": vector,
                 "payload": {
                     "document_id": document_id,
+                    "user_id": str(document.user_id),
                     "document_title": document.title,
                     "content": chunk.content,
                     "chunk_index": chunk.chunk_index,
@@ -66,32 +69,31 @@ def _index_in_background(document_id: str) -> None:
     finally:
         db.close()
 
-# Temporary hardcoded user — we'll replace with real auth in Step 12
-TEST_USER_EMAIL = "test@lumina.dev"
 
-
-def get_or_create_test_user(db: Session) -> User:
-    """Returns the test user, creating one if it doesn't exist."""
-    user = db.query(User).filter(User.email == TEST_USER_EMAIL).first()
-    if user is None:
-        user = User(email=TEST_USER_EMAIL, name="Test User")
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-    return user
+def _get_owned_document(document_id: str, user: User, db: Session) -> Document:
+    """Return a document only if it belongs to the current user, else raise 404."""
+    doc = db.query(Document).filter(
+        Document.id == document_id,
+        Document.user_id == user.id,
+    ).first()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
 
 
 @router.get("/{document_id}/status")
-def get_document_status(document_id: str, db: Session = Depends(get_db)):
+def get_document_status(
+    document_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Poll the processing/indexing status of a document."""
-    doc = db.query(Document).filter(Document.id == document_id).first()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+    doc = _get_owned_document(document_id, current_user, db)
     return {"document_id": document_id, "status": doc.status, "page_count": doc.page_count}
 
 
 def _cleanup_after_delete(document_id: str, file_url: str | None) -> None:
-    """Background task: remove Qdrant vectors and the Storage file after the DB record is gone."""
+    """Background task: remove Qdrant vectors and the Storage file after DB record is gone."""
     from app.services.vector_store import delete_chunks_for_document
 
     try:
@@ -111,24 +113,19 @@ def delete_document(
     document_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Instantly delete a document then clean up Qdrant vectors + Storage file in the background.
-    DB-level CASCADE handles chunks → conversations → messages automatically.
-    """
-    doc = db.query(Document).filter(Document.id == document_id).first()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-
+    """Delete a document (and cascade its chunks/conversations/messages)."""
+    doc = _get_owned_document(document_id, current_user, db)
     file_url = doc.file_url
 
-    # Direct SQL DELETE — lets the DB CASCADE handle child rows without loading them into ORM.
-    db.query(Document).filter(Document.id == document_id).delete(synchronize_session=False)
+    db.query(Document).filter(
+        Document.id == document_id,
+        Document.user_id == current_user.id,
+    ).delete(synchronize_session=False)
     db.commit()
 
-    # Qdrant + Storage cleanup runs after the response is sent — user never waits for it.
     background_tasks.add_task(_cleanup_after_delete, document_id, file_url)
-
     return Response(status_code=204)
 
 
@@ -137,49 +134,34 @@ async def upload_document(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Upload a PDF document.
-    Validates file type, stores in Supabase Storage, creates DB record,
-    parses and chunks the PDF, then auto-indexes embeddings in the background.
-    """
-    # Validate content type
+    """Upload a PDF, store it, parse+chunk it, then auto-index embeddings."""
     if file.content_type != "application/pdf":
         raise HTTPException(
             status_code=400,
             detail=f"Only PDF files are allowed. Got: {file.content_type}",
         )
 
-    # Read the file into memory
     file_bytes = await file.read()
 
-    # Check file size (50 MB max)
-    max_size = 50 * 1024 * 1024
-    if len(file_bytes) > max_size:
+    if len(file_bytes) > 50 * 1024 * 1024:
         raise HTTPException(
             status_code=400,
             detail=f"File too large. Max 50 MB. Got: {len(file_bytes) / 1024 / 1024:.1f} MB",
         )
 
-    # Get/create test user
-    user = get_or_create_test_user(db)
-
-    # Upload to Supabase Storage
     try:
         storage_result = upload_pdf(
             file_bytes=file_bytes,
             original_filename=file.filename or "unnamed.pdf",
-            user_id=str(user.id),
+            user_id=str(current_user.id),
         )
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Storage upload failed: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Storage upload failed: {str(e)}")
 
-    # Create database record (status starts as "processing")
     document = Document(
-        user_id=user.id,
+        user_id=current_user.id,
         title=file.filename or "Untitled",
         filename=file.filename or "unnamed.pdf",
         file_url=storage_result["path"],
@@ -189,12 +171,10 @@ async def upload_document(
     db.commit()
     db.refresh(document)
 
-    # Parse PDF + create chunks (synchronous), then kick off background indexing
     chunk_count = 0
     processing_ok = False
     try:
-        result = parse_pdf(file_bytes)  # reuse bytes already in memory
-
+        result = parse_pdf(file_bytes)
         chunk_objects = [
             Chunk(
                 document_id=document.id,
@@ -205,12 +185,10 @@ async def upload_document(
             for chunk in result["chunks"]
         ]
         db.bulk_save_objects(chunk_objects)
-
         document.page_count = result["page_count"]
-        document.status = "indexing"   # background task will flip this to "ready"
+        document.status = "indexing"
         db.commit()
         db.refresh(document)
-
         chunk_count = len(result["chunks"])
         processing_ok = True
     except Exception as e:
@@ -233,12 +211,14 @@ async def upload_document(
 
 
 @router.get("/")
-def list_documents(db: Session = Depends(get_db)):
-    """List all documents for the test user."""
-    user = get_or_create_test_user(db)
+def list_documents(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """List all documents belonging to the current user."""
     documents = (
         db.query(Document)
-        .filter(Document.user_id == user.id)
+        .filter(Document.user_id == current_user.id)
         .order_by(Document.created_at.desc())
         .all()
     )
@@ -260,14 +240,10 @@ def list_documents(db: Session = Depends(get_db)):
 def process_document(
     document_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Manually re-process a PDF (useful for documents that failed or pre-date auto-processing).
-    Parses the PDF, generates chunks, updates status.
-    """
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if document is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+    """Manually re-process a PDF (parse + chunk + re-index)."""
+    document = _get_owned_document(document_id, current_user, db)
 
     if document.status == "ready":
         return {
@@ -280,13 +256,9 @@ def process_document(
     db.commit()
 
     try:
-        # Download bytes from storage
         pdf_bytes = download_pdf(document.file_url)
-
-        # Parse and chunk
         result = parse_pdf(pdf_bytes)
 
-        # Delete any old chunks before re-creating (avoids duplicates on retry)
         db.query(Chunk).filter(Chunk.document_id == document.id).delete()
 
         chunk_objects = [
@@ -315,26 +287,20 @@ def process_document(
     except Exception as e:
         document.status = "failed"
         db.commit()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Processing failed: {str(e)}",
-        )
-    
+        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+
 @router.post("/{document_id}/index")
 def index_document(
     document_id: str,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Generate embeddings for all chunks of a document and store in Qdrant.
-    This is what makes the document searchable.
-    """
+    """Generate embeddings for all chunks and store in Qdrant."""
     from app.services.embeddings import embed_batch
     from app.services.vector_store import ensure_collection, upsert_chunks, delete_chunks_for_document
 
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if document is None:
-        raise HTTPException(status_code=404, detail="Document not found")
+    document = _get_owned_document(document_id, current_user, db)
 
     if document.status != "ready":
         raise HTTPException(
@@ -346,25 +312,20 @@ def index_document(
     if not chunks:
         raise HTTPException(status_code=400, detail="No chunks found for this document")
 
-    # Ensure Qdrant collection exists
     ensure_collection()
-
-    # Delete any old vectors for this document (in case of re-indexing)
     delete_chunks_for_document(str(document.id))
 
     try:
-        # Generate embeddings (this is the slow part — ~1-2s per chunk on HF free tier)
-        print(f"🧠 Generating embeddings for {len(chunks)} chunks...")
         contents = [c.content for c in chunks]
         vectors = embed_batch(contents)
 
-        # Build points for Qdrant
         points = [
             {
                 "id": str(chunk.id),
                 "vector": vector,
                 "payload": {
                     "document_id": str(document.id),
+                    "user_id": str(current_user.id),
                     "document_title": document.title,
                     "content": chunk.content,
                     "chunk_index": chunk.chunk_index,
@@ -374,9 +335,7 @@ def index_document(
             for chunk, vector in zip(chunks, vectors)
         ]
 
-        # Upload to Qdrant
         count = upsert_chunks(points)
-
         return {
             "message": "Indexing complete",
             "document_id": str(document.id),
@@ -384,37 +343,24 @@ def index_document(
         }
 
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Indexing failed: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
+
+
 @router.post("/{document_id}/search")
 def search_document(
     document_id: str,
     query: str,
     limit: int = 5,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Semantic search within a document.
-    Returns the chunks most relevant to the query.
-    """
+    """Semantic search within a document."""
     from app.services.embeddings import embed_text
     from app.services.vector_store import search_similar
 
-    document = db.query(Document).filter(Document.id == document_id).first()
-    if document is None:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    # Embed the user's query
+    document = _get_owned_document(document_id, current_user, db)
     query_vector = embed_text(query)
-
-    # Search Qdrant
-    results = search_similar(
-        query_vector=query_vector,
-        limit=limit,
-        document_id=str(document.id),
-    )
+    results = search_similar(query_vector=query_vector, limit=limit, document_id=str(document.id))
 
     return {
         "query": query,
@@ -427,4 +373,4 @@ def search_document(
             }
             for r in results
         ],
-    }        
+    }

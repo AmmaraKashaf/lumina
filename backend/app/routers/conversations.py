@@ -1,5 +1,6 @@
 """
 Conversation endpoints — create chats, send messages with memory, stream responses.
+All endpoints require a valid JWT; users can only access their own conversations.
 """
 
 import json
@@ -9,9 +10,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import get_db, SessionLocal
-from app.models import Conversation, Message, Document
-from app.routers.documents import get_or_create_test_user
-from app.services.rag import answer_question, answer_question_stream
+from app.models import Conversation, Message, Document, User
+from app.auth import get_current_user
+from app.services.rag import answer_question_stream
 
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -52,7 +53,6 @@ class SendMessageRequest(BaseModel):
 # ─── Helpers ────────────────────────────────────────────────────────────
 
 def _get_conversation_history(db: Session, conv_id: str) -> List[dict]:
-    """Load past messages for memory context."""
     msgs = (
         db.query(Message)
         .filter(Message.conversation_id == conv_id)
@@ -63,9 +63,18 @@ def _get_conversation_history(db: Session, conv_id: str) -> List[dict]:
 
 
 def _auto_title(question: str) -> str:
-    """Truncate first question to make a conversation title."""
     title = question.strip().replace("\n", " ")
     return title[:60] + ("..." if len(title) > 60 else "")
+
+
+def _get_owned_conversation(conversation_id: str, user: User, db: Session) -> Conversation:
+    conv = db.query(Conversation).filter(
+        Conversation.id == conversation_id,
+        Conversation.user_id == user.id,
+    ).first()
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return conv
 
 
 # ─── Endpoints ──────────────────────────────────────────────────────────
@@ -74,16 +83,18 @@ def _auto_title(question: str) -> str:
 def create_conversation(
     request: CreateConversationRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """Start a new chat session bound to a document."""
-    user = get_or_create_test_user(db)
-
-    doc = db.query(Document).filter(Document.id == request.document_id).first()
+    """Start a new chat session bound to a document the user owns."""
+    doc = db.query(Document).filter(
+        Document.id == request.document_id,
+        Document.user_id == current_user.id,
+    ).first()
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
 
     conv = Conversation(
-        user_id=user.id,
+        user_id=current_user.id,
         document_id=doc.id,
         title=request.title,
     )
@@ -104,10 +115,10 @@ def create_conversation(
 def list_conversations(
     document_id: Optional[str] = None,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """List all conversations, optionally filtered by document."""
-    user = get_or_create_test_user(db)
-    q = db.query(Conversation).filter(Conversation.user_id == user.id)
+    """List all conversations belonging to the current user."""
+    q = db.query(Conversation).filter(Conversation.user_id == current_user.id)
     if document_id:
         q = q.filter(Conversation.document_id == document_id)
     convs = q.order_by(Conversation.updated_at.desc()).all()
@@ -125,11 +136,13 @@ def list_conversations(
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
-def get_conversation(conversation_id: str, db: Session = Depends(get_db)):
+def get_conversation(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Get a conversation with all its messages."""
-    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = _get_owned_conversation(conversation_id, current_user, db)
 
     return ConversationDetail(
         id=str(conv.id),
@@ -151,11 +164,13 @@ def get_conversation(conversation_id: str, db: Session = Depends(get_db)):
 
 
 @router.delete("/{conversation_id}")
-def delete_conversation(conversation_id: str, db: Session = Depends(get_db)):
+def delete_conversation(
+    conversation_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Delete a conversation and all its messages."""
-    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = _get_owned_conversation(conversation_id, current_user, db)
     db.delete(conv)
     db.commit()
     return {"deleted": True}
@@ -166,19 +181,14 @@ def send_message_stream(
     conversation_id: str,
     request: SendMessageRequest,
     db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
 ):
-    """
-    Send a message and stream the AI's response token-by-token.
-    Uses Server-Sent Events (SSE).
-    """
-    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    """Send a message and stream the AI's response token-by-token (SSE)."""
+    conv = _get_owned_conversation(conversation_id, current_user, db)
 
     if not request.content.strip():
         raise HTTPException(status_code=400, detail="Message cannot be empty")
 
-    # Save user message immediately
     user_msg = Message(
         conversation_id=conv.id,
         role="user",
@@ -186,15 +196,12 @@ def send_message_stream(
     )
     db.add(user_msg)
 
-    # Auto-generate title from first user message
     if conv.title is None:
         conv.title = _auto_title(request.content)
 
     db.commit()
 
-    # Load history (now includes the just-saved user message)
     history = _get_conversation_history(db, str(conv.id))
-    # Remove the last item (current user message) — we pass it separately
     history_for_llm = history[:-1] if history else []
 
     document_id = str(conv.document_id)
@@ -203,11 +210,6 @@ def send_message_stream(
     top_k = request.top_k
 
     def event_stream():
-        """
-        Generator that yields SSE events and saves the final assistant message.
-        Uses a dedicated DB session because the request-scoped one closes
-        before this generator finishes streaming.
-        """
         full_answer = ""
         captured_sources = []
         stream_db = SessionLocal()
@@ -224,15 +226,12 @@ def send_message_stream(
                     captured_sources = event["data"]
                 elif event["type"] == "token":
                     full_answer += event["data"]
-                # Forward event to client as SSE
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as e:
-            err_event = {"type": "error", "data": str(e)}
-            yield f"data: {json.dumps(err_event)}\n\n"
+            yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
             stream_db.close()
             return
 
-        # Persist the assistant message after stream completes
         try:
             asst_msg = Message(
                 conversation_id=conv_id,

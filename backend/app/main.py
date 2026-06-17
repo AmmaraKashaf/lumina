@@ -13,10 +13,14 @@ app = FastAPI(
 )
 
 _dev_origins = [f"http://localhost:{p}" for p in range(3000, 3010)]
+_prod_origins = [
+    "http://32.193.168.187",
+    "https://chatwithlumina.vercel.app",
+]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_dev_origins,
+    allow_origins=_dev_origins + _prod_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

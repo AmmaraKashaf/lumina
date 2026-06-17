@@ -19,6 +19,9 @@ class Settings(BaseSettings):
 
     # Groq (free LLM)
     GROQ_API_KEY: str
+    # Supabase JWT (Settings → API → JWT Secret in Supabase dashboard)
+    SUPABASE_JWT_SECRET: str = ""
+
     # App
     ENVIRONMENT: str = "development"
 

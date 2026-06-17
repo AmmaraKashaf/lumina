@@ -7,6 +7,8 @@ from pydantic import BaseModel
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from app.database import get_db
+from app.models import Document, User
+from app.auth import get_current_user
 from app.services.rag import answer_question
 
 
@@ -31,10 +33,22 @@ class ChatResponse(BaseModel):
 
 
 @router.post("/", response_model=ChatResponse)
-def chat(request: ChatRequest, db: Session = Depends(get_db)):
+def chat(
+    request: ChatRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     """Ask a question. Returns AI answer grounded in document chunks."""
     if not request.question.strip():
         raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    if request.document_id:
+        doc = db.query(Document).filter(
+            Document.id == request.document_id,
+            Document.user_id == current_user.id,
+        ).first()
+        if doc is None:
+            raise HTTPException(status_code=404, detail="Document not found")
 
     try:
         result = answer_question(
@@ -45,7 +59,4 @@ def chat(request: ChatRequest, db: Session = Depends(get_db)):
         )
         return result
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Chat failed: {str(e)}",
-        )
+        raise HTTPException(status_code=500, detail=f"Chat failed: {str(e)}")
