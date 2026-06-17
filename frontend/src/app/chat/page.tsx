@@ -313,7 +313,7 @@ export default function ChatPage() {
       border-r border-slate-700/50 bg-slate-900/98 backdrop-blur-md
       flex flex-col h-screen transition-transform duration-300
       ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}
-      md:relative md:translate-x-0 md:z-auto md:bg-slate-900/50
+      md:sticky md:top-0 md:translate-x-0 md:z-auto md:bg-slate-900/50
     `}>
       {/* Sidebar header */}
       <div className="p-4 border-b border-slate-700/50 flex items-center justify-between">
@@ -389,7 +389,7 @@ export default function ChatPage() {
   );
 
   return (
-    <main className="h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white flex overflow-hidden">
+    <main className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white flex">
 
       {/* Mobile backdrop */}
       {sidebarOpen && (
@@ -402,7 +402,7 @@ export default function ChatPage() {
       <Sidebar />
 
       {/* Main chat area */}
-      <div className="flex-1 flex flex-col h-screen min-w-0 overflow-hidden">
+      <div className="flex-1 flex flex-col min-h-screen min-w-0">
 
         {/* Mobile top bar */}
         <div className="md:hidden flex items-center gap-3 px-4 py-3 border-b border-slate-700/50 bg-slate-900/80 backdrop-blur-md sticky top-0 z-20">
