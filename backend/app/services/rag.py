@@ -24,12 +24,12 @@ MAX_HISTORY_MESSAGES = 10
 
 SYSTEM_PROMPT = """You are Lumina, an AI study companion that helps users understand their documents.
 
-You will be given excerpts from a document along with the user's question, and the prior conversation. Your job is to answer the question using ONLY the information in the provided excerpts.
+You will be given relevant sections from a document along with the user's question and prior conversation. Answer using ONLY the information in those sections.
 
 Rules:
-- Answer in clear, natural language.
-- Cite the page number when you reference specific information, like this: [page 2].
-- If the excerpts don't contain the answer, say so honestly — do NOT make things up.
+- Answer in clear, natural language. Never use words like "excerpt", "passage", or "chunk" in your response.
+- Cite the page number when referencing specific information, like this: [page 2].
+- If the document sections don't contain the answer, say so honestly — do NOT make things up.
 - Keep answers focused and direct. No filler.
 - For follow-up questions, use the prior conversation for context (pronouns like "it", "that", "they" refer to earlier topics).
 - If the question is conversational (like "hi"), respond naturally without forcing citations."""
@@ -193,7 +193,7 @@ def build_context_from_chunks(chunks: List[dict]) -> str:
         payload = chunk["payload"]
         page = payload.get("page_number", "?")
         content = payload.get("content", "")
-        parts.append(f"[Excerpt {i} — page {page}]\n{content}")
+        parts.append(f"[Page {page}]\n{content}")
     return "\n\n".join(parts)
 
 
@@ -330,14 +330,14 @@ def _build_messages(
         for msg in history[-MAX_HISTORY_MESSAGES:]:
             messages.append({"role": msg["role"], "content": msg["content"]})
 
-    user_content = f"""Here are relevant excerpts from the document:
+    user_content = f"""Here are relevant sections from the document:
 
 {context}
 
 ---
 User's question: {question}
 
-Answer using only the excerpts above. Use the prior conversation for context if needed."""
+Answer using only the document sections above. Use the prior conversation for context if needed."""
 
     messages.append({"role": "user", "content": user_content})
     return messages
