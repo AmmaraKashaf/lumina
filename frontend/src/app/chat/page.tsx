@@ -389,7 +389,7 @@ export default function ChatPage() {
   );
 
   return (
-    <main className="min-h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white flex">
+    <main className="h-screen bg-gradient-to-br from-slate-900 via-purple-900 to-slate-900 text-white flex overflow-hidden">
 
       {/* Mobile backdrop */}
       {sidebarOpen && (
@@ -402,7 +402,7 @@ export default function ChatPage() {
       <Sidebar />
 
       {/* Main chat area */}
-      <div className="flex-1 flex flex-col min-h-screen min-w-0">
+      <div className="flex-1 flex flex-col h-screen min-w-0 overflow-hidden">
 
         {/* Mobile top bar */}
         <div className="md:hidden flex items-center gap-3 px-4 py-3 border-b border-slate-700/50 bg-slate-900/80 backdrop-blur-md sticky top-0 z-20">
