@@ -202,7 +202,7 @@ def send_message_stream(
     db.commit()
 
     history = _get_conversation_history(db, str(conv.id))
-    history_for_llm = history[:-1] if history else []
+    history_for_llm = [m for m in history[:-1] if m.get("content", "").strip()]
 
     document_id = str(conv.document_id)
     question = request.content
@@ -228,6 +228,8 @@ def send_message_stream(
                     full_answer += event["data"]
                 yield f"data: {json.dumps(event)}\n\n"
         except Exception as e:
+            import traceback
+            print(f"[STREAM ERROR] {e}\n{traceback.format_exc()}", flush=True)
             yield f"data: {json.dumps({'type': 'error', 'data': str(e)})}\n\n"
             stream_db.close()
             return
