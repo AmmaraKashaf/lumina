@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +21,10 @@ class Settings(BaseSettings):
 
     # Groq (free LLM)
     GROQ_API_KEY: str
+    # Any chat model from Groq's model list; change it here when Groq retires a model
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
+    # For reasoning models like gpt-oss: low / medium / high. Leave empty for models without reasoning.
+    GROQ_REASONING_EFFORT: Literal["", "low", "medium", "high"] = "low"
     # Supabase JWT (Settings → API → JWT Secret in Supabase dashboard)
     SUPABASE_JWT_SECRET: str = ""
 

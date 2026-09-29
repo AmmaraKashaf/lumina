@@ -9,16 +9,13 @@ RAG (Retrieval-Augmented Generation) service with smart question routing.
 
 import re
 from typing import List, Optional, Iterator, Dict
-from groq import Groq
 from sqlalchemy.orm import Session
-from app.config import settings
+from app.services import llm
 from app.services.embeddings import embed_text
 from app.services.vector_store import search_similar
 from app.models import Chunk
 
 
-_groq = Groq(api_key=settings.GROQ_API_KEY)
-LLM_MODEL = "llama-3.3-70b-versatile"
 MAX_HISTORY_MESSAGES = 10
 
 
@@ -418,15 +415,14 @@ def answer_question(
         }
 
     messages = _build_messages(question, context, history)
-    response = _groq.chat.completions.create(
-        model=LLM_MODEL,
+    response = llm.chat(
         max_tokens=1024,
         temperature=0.3,
         messages=messages,
     )
 
     return {
-        "answer": response.choices[0].message.content,
+        "answer": llm.text(response),
         "sources": sources,
     }
 
@@ -451,17 +447,26 @@ def answer_question_stream(
 
     messages = _build_messages(question, context, history)
 
-    stream = _groq.chat.completions.create(
-        model=LLM_MODEL,
+    stream = llm.chat(
         max_tokens=1024,
         temperature=0.3,
         messages=messages,
         stream=True,
     )
 
+    got_answer = False
+    finish_reason = None
     for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            yield {"type": "token", "data": delta}
+        if not chunk.choices:
+            continue
+        choice = chunk.choices[0]
+        finish_reason = choice.finish_reason or finish_reason
+        # Reasoning models stream their thinking separately; only content is the answer
+        if choice.delta.content:
+            got_answer = True
+            yield {"type": "token", "data": choice.delta.content}
+
+    if not got_answer:
+        raise RuntimeError(llm.no_answer_message(finish_reason))
 
     yield {"type": "done", "data": None}

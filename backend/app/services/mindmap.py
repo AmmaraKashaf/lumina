@@ -6,14 +6,11 @@ and returns a graph structure for visualization.
 
 import json
 from typing import Optional
-from groq import Groq
 from sqlalchemy.orm import Session
-from app.config import settings
+from app.services import llm
 from app.models import Chunk
 
 
-_groq = Groq(api_key=settings.GROQ_API_KEY)
-LLM_MODEL = "llama-3.3-70b-versatile"
 
 
 def _get_document_text(db: Session, document_id: str, max_chunks: int = 50) -> str:
@@ -91,8 +88,7 @@ def generate_mindmap(db: Session, document_id: str) -> dict:
 ---
 Generate a mind map following the rules above. Return only JSON."""
 
-    response = _groq.chat.completions.create(
-        model=LLM_MODEL,
+    response = llm.chat(
         max_tokens=3000,
         temperature=0.4,
         messages=[
@@ -102,7 +98,7 @@ Generate a mind map following the rules above. Return only JSON."""
         response_format={"type": "json_object"},
     )
 
-    raw = response.choices[0].message.content
+    raw = llm.text(response)
     data = _extract_json(raw)
 
     # Validate basic shape

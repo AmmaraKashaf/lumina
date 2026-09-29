@@ -5,14 +5,11 @@ Uses Groq LLM, grounded in chunks retrieved from Qdrant.
 
 import json
 from typing import List, Literal, Optional
-from groq import Groq
 from sqlalchemy.orm import Session
-from app.config import settings
+from app.services import llm
 from app.models import Chunk
 
 
-_groq = Groq(api_key=settings.GROQ_API_KEY)
-LLM_MODEL = "llama-3.3-70b-versatile"
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────
@@ -93,8 +90,7 @@ Task: {prompt}
 
 Important: Use ONLY the content above. Do not invent information."""
 
-    response = _groq.chat.completions.create(
-        model=LLM_MODEL,
+    response = llm.chat(
         max_tokens=1024,
         temperature=0.4,
         messages=[
@@ -102,7 +98,7 @@ Important: Use ONLY the content above. Do not invent information."""
             {"role": "user", "content": user_message},
         ],
     )
-    return response.choices[0].message.content.strip()
+    return llm.text(response).strip()
 
 
 # ─── 2. QUIZ ───────────────────────────────────────────────────────────
@@ -149,8 +145,7 @@ def generate_quiz(
 ---
 Generate exactly {num_questions} multiple choice questions following the rules above. Return only JSON."""
 
-    response = _groq.chat.completions.create(
-        model=LLM_MODEL,
+    response = llm.chat(
         max_tokens=2048,
         temperature=0.5,
         messages=[
@@ -160,7 +155,7 @@ Generate exactly {num_questions} multiple choice questions following the rules a
         response_format={"type": "json_object"},
     )
 
-    raw = response.choices[0].message.content
+    raw = llm.text(response)
     parsed = _extract_json(raw)
 
     # Normalize shape — Groq sometimes returns just a list
@@ -208,8 +203,7 @@ def generate_flashcards(
 ---
 Generate exactly {num_cards} flashcards following the rules above. Return only JSON."""
 
-    response = _groq.chat.completions.create(
-        model=LLM_MODEL,
+    response = llm.chat(
         max_tokens=2048,
         temperature=0.5,
         messages=[
@@ -219,7 +213,7 @@ Generate exactly {num_cards} flashcards following the rules above. Return only J
         response_format={"type": "json_object"},
     )
 
-    raw = response.choices[0].message.content
+    raw = llm.text(response)
     parsed = _extract_json(raw)
 
     cards = parsed.get("flashcards", parsed) if isinstance(parsed, dict) else parsed
