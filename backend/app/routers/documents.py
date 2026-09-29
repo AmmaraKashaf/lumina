@@ -3,6 +3,9 @@ Document endpoints: upload (with auto-processing), list, delete, reprocess.
 All endpoints require a valid Supabase JWT — every user sees only their own data.
 """
 
+import logging
+import time
+
 from fastapi import APIRouter, BackgroundTasks, Depends, UploadFile, File, HTTPException, Response, status
 from sqlalchemy.orm import Session
 from app.database import get_db, SessionLocal
@@ -13,6 +16,7 @@ from app.services.pdf_parser import parse_pdf
 
 
 router = APIRouter(prefix="/documents", tags=["documents"])
+logger = logging.getLogger("lumina.indexing")
 
 
 def _index_in_background(document_id: str) -> None:
@@ -20,21 +24,34 @@ def _index_in_background(document_id: str) -> None:
     from app.services.embeddings import embed_batch
     from app.services.vector_store import delete_chunks_for_document, ensure_collection, upsert_chunks
 
+    # Track the current step so a failure says *where* it happened, not just the error text
+    stage = "loading document"
+    chunk_count = 0
+    started = time.monotonic()
     db = SessionLocal()
     try:
         document = db.query(Document).filter(Document.id == document_id).first()
         if not document:
+            logger.warning("Indexing skipped for %s: document not found", document_id)
             return
 
+        stage = "loading chunks"
         chunks = db.query(Chunk).filter(Chunk.document_id == document.id).all()
+        chunk_count = len(chunks)
         if not chunks:
             document.status = "ready"
             db.commit()
+            logger.warning("Indexing skipped for %s: no chunks", document_id)
             return
 
+        logger.info("Indexing started for %s (%d chunks)", document_id, chunk_count)
+
+        stage = "Qdrant: ensure collection"
         ensure_collection()
+        stage = "Qdrant: delete old chunks"
         delete_chunks_for_document(document_id)
 
+        stage = "generating embeddings"
         vectors = embed_batch([c.content for c in chunks])
         points = [
             {
@@ -51,21 +68,32 @@ def _index_in_background(document_id: str) -> None:
             }
             for chunk, vector in zip(chunks, vectors)
         ]
+        stage = "Qdrant: upsert vectors"
         upsert_chunks(points)
 
+        stage = "saving status"
         document.status = "ready"
         db.commit()
-        print(f"✅  Auto-indexing complete for {document_id} ({len(chunks)} chunks)")
+        logger.info(
+            "Indexing complete for %s (%d chunks, %.1fs)",
+            document_id, chunk_count, time.monotonic() - started,
+        )
 
     except Exception as exc:
-        print(f"⚠️  Auto-indexing failed for {document_id}: {exc}")
+        # logger.exception includes the full traceback in the log
+        logger.exception(
+            "Indexing FAILED for %s at step '%s' (%d chunks, after %.1fs): %s: %s",
+            document_id, stage, chunk_count, time.monotonic() - started,
+            type(exc).__name__, exc,
+        )
         try:
+            db.rollback()  # the session may be unusable if the failure came from the DB
             doc = db.query(Document).filter(Document.id == document_id).first()
             if doc:
                 doc.status = "index_failed"
                 db.commit()
         except Exception:
-            pass
+            logger.exception("Could not mark %s as index_failed", document_id)
     finally:
         db.close()
 
@@ -194,7 +222,7 @@ async def upload_document(
     except Exception as e:
         document.status = "failed"
         db.commit()
-        print(f"⚠️  Processing failed for {document.id}: {e}")
+        logger.exception("Processing failed for %s: %s: %s", document.id, type(e).__name__, e)
 
     if processing_ok:
         background_tasks.add_task(_index_in_background, str(document.id))
@@ -239,6 +267,7 @@ def list_documents(
 @router.post("/{document_id}/process")
 def process_document(
     document_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -273,21 +302,25 @@ def process_document(
         db.bulk_save_objects(chunk_objects)
 
         document.page_count = result["page_count"]
-        document.status = "ready"
+        # Same as upload: embeddings + Qdrant happen in the background, which sets "ready"
+        document.status = "indexing"
         db.commit()
         db.refresh(document)
-
-        return {
-            "message": "Processing complete",
-            "document_id": str(document.id),
-            "page_count": document.page_count,
-            "chunk_count": len(result["chunks"]),
-        }
 
     except Exception as e:
         document.status = "failed"
         db.commit()
+        logger.exception("Reprocess failed for %s: %s: %s", document_id, type(e).__name__, e)
         raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
+
+    background_tasks.add_task(_index_in_background, str(document.id))
+    return {
+        "message": "Processing complete, indexing started",
+        "document_id": str(document.id),
+        "page_count": document.page_count,
+        "chunk_count": len(result["chunks"]),
+        "status": document.status,
+    }
 
 
 @router.post("/{document_id}/index")
@@ -343,6 +376,7 @@ def index_document(
         }
 
     except Exception as e:
+        logger.exception("Manual indexing failed for %s: %s: %s", document_id, type(e).__name__, e)
         raise HTTPException(status_code=500, detail=f"Indexing failed: {str(e)}")
 
 

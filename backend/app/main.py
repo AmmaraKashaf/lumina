@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -5,6 +7,12 @@ from sqlalchemy import text
 from app.database import get_db
 from app.config import settings
 from app.routers import documents, chat, conversations, learning, mindmaps, converter
+
+# App loggers (e.g. "lumina.indexing") print with timestamps; uvicorn keeps its own format
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+)
 
 app = FastAPI(
     title="Lumina API",
